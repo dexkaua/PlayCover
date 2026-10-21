@@ -143,7 +143,7 @@ class MediaApps {
 
         // ...and any stale empty-string residue left by the old merge semantics.
         // Collect first, mutate after (never delete while enumerating).
-        let staleKeys = env.keys.compactMap { key -> String? in
+        let staleKeys = env.allKeys.compactMap { key -> String? in
             guard let k = key as? String,
                   let value = env.object(forKey: k) as? String,
                   value.isEmpty else { return nil }
@@ -236,7 +236,8 @@ class MediaApps {
         let bundle = app.url
 
         // 1. Strip the LC_LOAD_DYLIB load command (both injection styles).
-        for injectPath in [playToolsSystemPath, "@executable_path/Frameworks/PlayTools.dylib"] {
+        let playToolsPathString = playToolsSystemPath.path
+        for injectPath in [playToolsPathString, "@executable_path/Frameworks/PlayTools.dylib"] {
             let semaphore = DispatchSemaphore(value: 0)
             Inject.removeMachO(machoPath: exec.path,
                                cmdType: .loadDylib,
@@ -309,7 +310,7 @@ class MediaApps {
     /// single sealed Info.plist.
     static func forceNativeiPadMode(in info: AppInfo) {
         // iPad-only device family
-        info[object: "UIDeviceFamily"] = [2].map { NSNumber(value: $0) }
+        info[object: "UIDeviceFamily"] = [NSNumber(value: 2)] as NSArray
 
         // Allow full-screen & window resizing on iPad
         info[bool: "UIRequiresFullScreen"] = false
@@ -333,7 +334,7 @@ class MediaApps {
     /// survived parsing (rawStorage round-trip) and logs the registered schemes so
     /// LaunchServices registration issues are diagnosable.
     static func preserveURLSchemes(in info: AppInfo) {
-        guard let urlTypes = info[array: "CFBundleURLTypes"], !urlTypes.isEmpty else {
+        guard let urlTypes = info[array: "CFBundleURLTypes"], urlTypes.count > 0 else {
             Log.shared.log("Media app has no CFBundleURLTypes — Safari deep links unavailable")
             return
         }

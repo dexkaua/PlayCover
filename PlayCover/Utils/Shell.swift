@@ -127,7 +127,7 @@ class Shell: ObservableObject {
                     let versionsBinary = url
                         .appendingPathComponent("Versions/A/\(url.deletingPathExtension().lastPathComponent)")
                     if FileManager.default.fileExists(atPath: versionsBinary.path) {
-                        try? run("/usr/bin/codesign", "-fs-", versionsBinary.path)
+                        _ = try? run("/usr/bin/codesign", "-fs-", versionsBinary.path)
                     }
                     try? run("/usr/bin/codesign", "-fs-", url.path)
                 } else {
