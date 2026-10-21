@@ -144,11 +144,36 @@ class AppSettings {
 
     public func sync() {
         var updatedSettings = settings
-        updatedSettings.notch = NSScreen.hasNotch()
-        if updatedSettings.resolution == 1 {
-            let resolution = AppSettings.autoResolution()
-            updatedSettings.windowWidth = resolution.width
-            updatedSettings.windowHeight = resolution.height
+        // Media editors (Alight Motion): keep the neutralized configuration and a
+        // locked iPad Pro 4:3 landscape canvas; never re-derive "Auto" resolution
+        // from the macOS display, which would feed PlayTools a drawable size that
+        // breaks the editor's Metal buffers.
+        let mediaApp = MediaApps.isMediaApp(info.bundleIdentifier)
+        if !mediaApp {
+            updatedSettings.notch = NSScreen.hasNotch()
+            if updatedSettings.resolution == 1 {
+                let resolution = AppSettings.autoResolution()
+                updatedSettings.windowWidth = resolution.width
+                updatedSettings.windowHeight = resolution.height
+            }
+        } else {
+            updatedSettings.keymapping = false
+            updatedSettings.playChain = false
+            updatedSettings.metalHUD = false
+            updatedSettings.disableBuiltinMouse = false
+            updatedSettings.windowFixMethod = 1
+            updatedSettings.resizableAspectRatioType = 1
+            updatedSettings.resizableAspectRatioWidth = 4
+            updatedSettings.resizableAspectRatioHeight = 3
+            updatedSettings.aspectRatio = 0
+            updatedSettings.resolution = 0
+            updatedSettings.customScaler = 1.0
+            updatedSettings.notch = false
+            // iPad Pro 11" (landscape) reference proportions: 4:3 logical canvas
+            if updatedSettings.windowWidth <= 0 || updatedSettings.windowHeight <= 0 {
+                updatedSettings.windowWidth = 1668
+                updatedSettings.windowHeight = 1251
+            }
         }
         settings = updatedSettings
     }

@@ -78,10 +78,39 @@ class PlayApp: BaseApp {
 
             settings.sync()
 
+            // Media editors (Alight Motion & co.): run on the pure Apple iOSSupport
+            // layer. Neutralize every game-oriented feature in the persisted
+            // settings, strip any residual PlayTools dylib from the Mach-O BEFORE
+            // signing (so no Obj-C +load hook ever executes), guarantee the native
+            // iPad plist layout, prune the legacy fictitious LSEnvironment flags,
+            // and plant the Finder symlinks. Everything here mutates the bundle
+            // before `sign()` re-seals it below.
+            if isMediaApp {
+                MediaApps.applySafeDefaults(to: self)
+                MediaApps.installBundleRulesIfNeeded(for: info.bundleIdentifier)
+                // Launch-time safety net: rip out any PlayTools residue left by an
+                // install made before this bypass policy existed (or toggled on via
+                // App Settings), so the editor always boots without the dylib.
+                MediaApps.ensurePlayToolsBypassed(for: self)
+                // Native iPad mode for the iOSSupport layer (idempotent):
+                // UIDeviceFamily = [2], UIRequiresFullScreen = false, landscape modes.
+                MediaApps.forceNativeiPadMode(in: info)
+                // Remove stale PT_DISABLE_* / AM_DISABLE_* keys the old scheme wrote;
+                // the prebuilt PlayTools never read them and we no longer inject it.
+                MediaApps.pruneLegacyEnvironment(in: info)
+                try? info.write()
+                // Finder access: plant Mac_Downloads/Mac_Movies/Mac_Desktop symlinks
+                // in the sandboxed container's Documents (no-op until first launch
+                // creates the container; persists afterwards).
+                MediaApps.createFinderShortcuts(for: info.bundleIdentifier)
+            }
+
             // Install PlugIns/localizations before signing so the bundle is fully
             // assembled before its signature is sealed over its contents.
             // If the app does not have PlayTools, do not install PlugIns
-            if hasPlayTools() {
+            // (media editors bypass PlayTools entirely — never re-copy the HUD /
+            // AKInterface plug-ins into their bundle).
+            if hasPlayTools(), !isMediaApp {
                 try PlayTools.installPluginInIPA(url)
             }
 
@@ -122,6 +151,10 @@ extension PlayApp {
     static let introspection: String = "/usr/lib/system/introspection"
     static let iosFrameworks: String = "/System/iOSSupport/System/Library/Frameworks"
 
+    /// True when this app is a known video editor (Alight Motion & friends) that
+    /// must run without PlayTools' game-oriented hooks.
+    var isMediaApp: Bool { MediaApps.isMediaApp(info.bundleIdentifier) }
+
     /// Common Metal and capture related environment keys used in multiple places
     private static let metalEnvKeys: [String] = [
         "METAL_DEVICE_WRAPPER_TYPE",
@@ -150,6 +183,12 @@ extension PlayApp {
         for key in PlayApp.metalEnvKeys {
             unsetenv(key)
         }
+
+        // Media editors (Alight Motion): never leak a Metal HUD/validation layer
+        // into the app's own render pipeline.
+        if isMediaApp {
+            MediaApps.clearHostEnvironment()
+        }
     }
 
     func runAppExec() {
@@ -161,6 +200,15 @@ extension PlayApp {
         }
         for key in PlayApp.metalEnvKeys {
             unsetenv(key)
+        }
+        if isMediaApp {
+            MediaApps.clearHostEnvironment()
+            // Safari deep links: re-register the wrapper as the official handler of
+            // its CFBundleURLTypes schemes on every launch, so shared-project links
+            // (alightcreative://, am://) keep resolving even after moves/updates.
+            MediaApps.registerWithLaunchServices(at: url)
+            // Re-plant Finder symlinks (covers the container created on first run).
+            MediaApps.createFinderShortcuts(for: info.bundleIdentifier)
         }
 
         NSWorkspace.shared.openApplication(
@@ -218,6 +266,9 @@ extension PlayApp {
 // MARK: - KeyCover
 extension PlayApp {
     func unlockKeyCover() async {
+        // PlayChain is a game-keychain helper; media editors (Alight Motion) must
+        // never have it attached to their process.
+        if isMediaApp { return }
         if KeyCover.shared.isKeyCoverEnabled() {
             let keychain = KeyCover.shared.listKeychains()
                 .first(where: { $0.appBundleID == self.info.bundleIdentifier })
