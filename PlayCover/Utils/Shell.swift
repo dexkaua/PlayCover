@@ -76,14 +76,69 @@ class Shell: ObservableObject {
         try run("/usr/bin/codesign", "-fs-", binary.path)
     }
 
+    /// Signs every embedded framework/dylib/bundle *inside* the app payload first,
+    /// then signs the main bundle with the given entitlements. This guarantees a
+    /// proper recursive (bottom-up) signature: `--deep` alone seals nested code in
+    /// an arbitrary order and can leave frameworks invalid when the outer bundle
+    /// is re-signed later (which kills media apps like Alight Motion on launch
+    /// because PlayTools/AVFoundation helpers fail library validation).
     static func signAppWith(_ exec: URL, entitlements: URL) throws {
-        try run("/usr/bin/codesign", "-fs-", exec.deletingLastPathComponent().path,
+        let appBundle = exec.deletingLastPathComponent()
+        try signNestedCode(in: appBundle)
+        try run("/usr/bin/codesign", "-fs-", appBundle.path,
                 "--deep", "--entitlements", entitlements.path)
     }
 
     static func signApp(_ exec: URL) throws {
-        try run("/usr/bin/codesign", "-fs-", exec.deletingLastPathComponent().path,
+        let appBundle = exec.deletingLastPathComponent()
+        try signNestedCode(in: appBundle)
+        try run("/usr/bin/codesign", "-fs-", appBundle.path,
                 "--deep", "--preserve-metadata=entitlements")
+    }
+
+    /// Bottom-up ad-hoc signing of nested Mach-O code (frameworks, dylibs, xpc,
+    /// app extensions, PlugIns bundles), deepest components first.
+    private static func signNestedCode(in appBundle: URL) throws {
+        let nestedRoots = [
+            appBundle.appendingPathComponent("Frameworks"),
+            appBundle.appendingPathComponent("PlugIns"),
+            appBundle.appendingPathComponent("XPCServices"),
+            appBundle.appendingPathComponent("Extensions"),
+            // Catalyst-style payloads keep PlayTools next to the executable too
+            execDirectoryFallback(appBundle)
+        ]
+
+        for root in nestedRoots {
+            guard FileManager.default.fileExists(atPath: root.path) else { continue }
+            // Sort by path depth descending so containers get signed after their contents
+            let urls = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
+                options: [])?.compactMap { $0 as? URL } ?? []
+            let candidates = urls.filter { url in
+                let ext = url.pathExtension
+                return ext == "framework" || ext == "bundle" || ext == "dylib"
+                    || ext == "xpc" || ext == "app"
+            }.sorted { $0.path.count > $1.path.count }
+
+            for url in candidates {
+                if url.pathExtension == "framework" {
+                    // Sign the versioned binary first, then the framework wrapper
+                    let versionsBinary = url
+                        .appendingPathComponent("Versions/A/\(url.deletingPathExtension().lastPathComponent)")
+                    if FileManager.default.fileExists(atPath: versionsBinary.path) {
+                        try? run("/usr/bin/codesign", "-fs-", versionsBinary.path)
+                    }
+                    try? run("/usr/bin/codesign", "-fs-", url.path)
+                } else {
+                    try? run("/usr/bin/codesign", "-fs-", url.path)
+                }
+            }
+        }
+    }
+
+    private static func execDirectoryFallback(_ appBundle: URL) -> URL {
+        appBundle.appendingPathComponent("MacOS")
     }
 
     static func setMetalHUD(_ bundleID: String, enabled: Bool) throws {

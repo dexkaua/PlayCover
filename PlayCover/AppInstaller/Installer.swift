@@ -58,6 +58,21 @@ class Installer {
             installPlayTools = InstallPreferences.shared.alwaysInstallPlayTools
         }
 
+        // REAL PLAYTOOLS BYPASS: media editors (Alight Motion & friends) must run on
+        // the pure Apple iOSSupport/Catalyst layer. The prebuilt Carthage PlayTools
+        // binary has no PT_DISABLE_* opt-outs, so its Obj-C +load hooks would still
+        // fire once the dylib is LC_LOAD_DYLIB'd into the Mach-O (Metal drawableSize
+        // overrides, CADisplayLink/contentsScale tampering, keymapping event capture)
+        // and crash the editor at startup. Force-disable injection for these bundles
+        // regardless of the popup/settings choice. The definitive bundle-id check
+        // happens again after unzip (below), where the Info.plist is parsed; this
+        // early pass uses the IPA filename as a best-effort pre-filter.
+        let forcedBypass = MediaApps.isMediaApp(ipa.url.deletingPathExtension().lastPathComponent)
+        if forcedBypass {
+            installPlayTools = false
+            Log.shared.log("PlayTools bypass enabled for media app — running via native iOSSupport layer")
+        }
+
         InstallVM.shared.next(.begin, 0.0, 0.0)
 
         Task(priority: .userInitiated) {
@@ -74,6 +89,14 @@ class Installer {
                     returnCompletion(nil)
                     return
                 }
+
+                // Definitive PlayTools bypass decision, based on the real bundle id
+                // parsed from the IPA's Info.plist (not just the file name).
+                if MediaApps.isMediaApp(app.info.bundleIdentifier) {
+                    installPlayTools = false
+                }
+                let mediaApp = forcedBypass || MediaApps.isMediaApp(app.info.bundleIdentifier)
+
                 InstallVM.shared.next(.library, 0.5, 0.55)
                 try saveEntitlements(app)
                 let machos = resolveValidMachOs(app)
@@ -93,9 +116,22 @@ class Installer {
                 }
 
                 if export {
-                    try PlayTools.injectInIPA(app.executable, payload: app.url)
+                    // Exporting a media app to IPA must not bake PlayTools into it;
+                    // skip injection and only strip binaries + quarantine below.
+                    if !mediaApp {
+                        try PlayTools.injectInIPA(app.executable, payload: app.url)
+                    }
                 } else if installPlayTools {
                     try await PlayTools.installInIPA(app.executable)
+                } else if mediaApp {
+                    // PURE iOSSupport EXECUTION: do NOT inject the PlayTools dylib at
+                    // all. If a previous pass (or a repacked IPA) already carries an
+                    // LC_LOAD_DYLIB pointing at PlayTools or a copied
+                    // Frameworks/PlayTools.dylib, rip it out *before* signing so no
+                    // Obj-C +load hook ever runs and macOS launches the app through
+                    // Apple's native iOSSupport/Catalyst layer (CAMetalLayer, UIDevice
+                    // "iPad", trackpad/pinch handled natively — no game hooks).
+                    MediaApps.purgePlayTools(from: app)
                 }
 
                 app.info.applicationCategoryType = applicationType
@@ -108,6 +144,32 @@ class Installer {
 
                 let info = app.info
                 info.assert(minimumVersion: 11.0)
+
+                // Media editors (Alight Motion): everything below runs before
+                // `try info.write()` so all plist mutations land inside one sealed,
+                // signed Info.plist:
+                //   * legacy fictitious LSEnvironment flags pruned (the prebuilt
+                //     PlayTools never read PT_DISABLE_*/AM_DISABLE_* and the dylib
+                //     is no longer injected at all — pure iOSSupport execution);
+                //   * native iPad mode for the pure iOSSupport path (UIDeviceFamily
+                //     = [2], UIRequiresFullScreen off, landscape orientations);
+                //   * CFBundleURLTypes preserved untouched so Safari deep links
+                //     (alightcreative://, am://) keep working;
+                //   * per-bundle sandbox rules for the media pipeline.
+                if MediaApps.isMediaApp(info.bundleIdentifier) {
+                    // AUDIT FIX: no LSEnvironment flags are injected anymore — the
+                    // prebuilt PlayTools binary never read PT_DISABLE_*/AM_DISABLE_*
+                    // and the dylib is not even loaded now (zero-injection bypass).
+                    // Instead, prune any residue from older installs of this fork.
+                    MediaApps.pruneLegacyEnvironment(in: info)
+                    MediaApps.forceNativeiPadMode(in: info)
+                    // Read-only assertion that the IPA's original CFBundleURLTypes
+                    // survived plist parsing untouched (Safari deep links). This step
+                    // never mutates or removes the key.
+                    MediaApps.preserveURLSchemes(in: info)
+                    MediaApps.installBundleRulesIfNeeded(for: info.bundleIdentifier)
+                }
+
                 try info.write()
                 InstallVM.shared.next(.wrapper, 0.85, 0.95)
 
@@ -119,7 +181,18 @@ class Installer {
                     finalURL = try wrap(app)
                     let installedApp = PlayApp(appUrl: finalURL)
 
+                    if MediaApps.isMediaApp(info.bundleIdentifier) {
+                        MediaApps.applySafeDefaults(to: installedApp)
+                    }
+                    // Clear quarantine attributes recursively BEFORE codesigning:
+                    // a stray com.apple.quarantine xattr on nested resources makes
+                    // LaunchServices refuse to open the freshly-signed bundle
+                    // (intermittent "app is damaged / cannot be opened" failures).
+                    MediaApps.clearQuarantineAttributes(at: finalURL)
                     installedApp.sign()
+                    // Register the wrapper as the official Safari/Links handler for
+                    // its CFBundleURLTypes schemes right after the signature is sealed.
+                    MediaApps.registerWithLaunchServices(at: finalURL)
                 }
 
                 try ipa.removeQuarantine(finalURL)

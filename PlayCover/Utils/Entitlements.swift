@@ -63,6 +63,32 @@ class Entitlements {
         base["com.apple.security.personal-information.location"] = true
         base["com.apple.security.print"] = true
         base["com.apple.security.app-sandbox"] = true
+        // Media pipeline requirements (video editors such as Alight Motion):
+        // VideoToolbox/AudioToolbox decoders and the Metal shader JIT need
+        // unsigned executable memory; PlayTools + user dylibs are ad-hoc signed,
+        // so library validation must stay off; get-task-allow keeps debugger /
+        // crash-reporter attachment working for diagnostics.
+        base["com.apple.security.cs.allow-unsigned-executable-memory"] = true
+        base["com.apple.security.cs.disable-library-validation"] = true
+        base["com.apple.security.get-task-allow"] = true
+    }
+
+    /// Extra entitlements force-enabled for known media/video editing apps so the
+    /// decoding/encoding pipeline never gets killed by the hardened runtime.
+    private static func setMediaAppEntitlements(_ base: inout [String: Any]) {
+        base["com.apple.security.cs.allow-unsigned-executable-memory"] = true
+        base["com.apple.security.cs.disable-library-validation"] = true
+        base["com.apple.security.get-task-allow"] = true
+        base["com.apple.security.files.user-selected.read-write"] = true
+        base["com.apple.security.assets.movies.read-write"] = true
+        base["com.apple.security.assets.pictures.read-write"] = true
+
+        // DIRECT FINDER ACCESS: keep the container sandbox (it is what isolates the
+        // app), but grant a home-relative read-write temporary exception so Alight
+        // Motion can open/save exported videos anywhere under the user's home
+        // folder — including the Mac_Downloads / Mac_Movies / Mac_Desktop symlinks
+        // PlayCover plants in the container's Documents directory at launch.
+        base["com.apple.security.temporary-exception.files.home-relative-path.read-write"] = ["/"]
     }
 
     // swiftlint:disable:next cyclomatic_complexity
@@ -71,6 +97,10 @@ class Entitlements {
         let bundleID = app.info.bundleIdentifier
 
         setBaseEntitlements(&base)
+
+        if MediaApps.isMediaApp(bundleID) {
+            setMediaAppEntitlements(&base)
+        }
 
         if SystemConfig.isPlaySignActive {
             base["com.apple.private.tcc.allow"] = TCC.split(whereSeparator: \.isNewline)
