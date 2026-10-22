@@ -7,6 +7,10 @@ import Cocoa
 import Foundation
 import IOKit.pwr_mgt
 
+// The Alight Motion compatibility helpers live in this file on purpose: adding
+// a new source file would require touching PBXBuildFile in project.pbxproj.
+// swiftlint:disable file_length
+
 class PlayApp: BaseApp {
     // MARK: - Static
     public static let bundleIDCacheURL = PlayTools.playCoverContainer.appendingPathComponent("CACHE")
@@ -61,6 +65,7 @@ class PlayApp: BaseApp {
     lazy var container = AppContainer(bundleId: info.bundleIdentifier)
 
     // MARK: - Launch
+    // swiftlint:disable:next cyclomatic_complexity
     func launch() async {
         do {
             isStarting = true
