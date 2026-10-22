@@ -15,8 +15,8 @@ env:
 
 jobs:
   build:
-    runs-on: macos-14
-    timeout-minutes: 90
+    runs-on: macos-latest
+    timeout-minutes: 120
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -151,7 +151,7 @@ jobs:
 
       - name: Build (arm64)
         shell: bash
-        timeout-minutes: 45
+        timeout-minutes: 60
         run: |
           set -euo pipefail
 
@@ -170,7 +170,7 @@ jobs:
             -disableAutomaticPackageResolution \
             -onlyUsePackageVersionsFromResolvedFile \
             -skipPackagePluginValidation \
-            FASTLANE=1
+            FASTLANE=1 2>&1 | tee build.log
 
       - name: Package DMG and ZIP
         shell: bash
@@ -199,6 +199,15 @@ jobs:
           cp -R "$APP" "$GITHUB_WORKSPACE/dmg_stage/"
           ln -s /Applications "$GITHUB_WORKSPACE/dmg_stage/Applications"
           hdiutil create -volname "PlayCover" -srcfolder "$GITHUB_WORKSPACE/dmg_stage" -ov -format UDZO "$GITHUB_WORKSPACE/PlayCover.dmg"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
