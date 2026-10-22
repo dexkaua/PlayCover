@@ -60,10 +60,11 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             FASTLANE=1 \
+            CONFIGURATION_BUILD_DIR="$GITHUB_WORKSPACE/output/Build" \
             2>&1 | tee "$BUILD_LOG"
-          # Fail the step if xcodebuild itself failed (tee hides the exit code)
-          grep -q "^BUILD SUCCEEDED" "$BUILD_LOG"
-          APP="$(find ./DerivedData/Build/Products -maxdepth 2 -name 'PlayCover*.app' -type d -print -quit)"
+          # xcodebuild already failed the step (set -euo pipefail) if the build
+          # did not succeed, so no need to grep the log for "BUILD SUCCEEDED".
+          APP="$(find . -name 'PlayCover*.app' -type d | grep -v 'SourcePackages' | head -n 1)"
           test -n "$APP"
           mkdir -p output
           rm -rf output/PlayCover.app
