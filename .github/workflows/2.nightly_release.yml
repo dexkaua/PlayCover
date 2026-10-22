@@ -4,75 +4,108 @@ on:
   workflow_dispatch:
   push:
 
+# A push supersedes any queued/in-progress run of the same branch instead of
+# stacking duplicate builds (each one costs ~20 minutes of macOS runner time).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CI: true
 
 jobs:
   build:
     runs-on: macos-14
+    timeout-minutes: 90
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # PlayTools/Sparkle are fetched from the GitHub API, which is both slow and
+      # rate limited. Restoring Carthage/Build lets the next step skip the fetch.
+      - name: Cache Carthage builds
+        uses: actions/cache@v4
+        with:
+          path: Carthage/Build
+          key: ${{ runner.os }}-carthage-${{ hashFiles('Cartfile.resolved', 'Cartfile') }}
+          restore-keys: |
+            ${{ runner.os }}-carthage-
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            DerivedData/SourcePackages
+          key: ${{ runner.os }}-swiftpm-${{ hashFiles('PlayCover.xcodeproj/project.pbxproj') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-
+
       - name: Install dependencies
         shell: bash
         run: |
           set -euo pipefail
 
-          # Carthage is already shipped on the runner image, but installing it
-          # is idempotent and guarantees the /opt/homebrew/bin symlink exists.
-          brew install carthage
-
-          # Carthage resolves PlayTools through the GitHub API. Handing it the
-          # token keeps us away from the anonymous 60 requests/hour limit
-          # ("API rate limit exceeded" is what killed earlier runs).
-          export GITHUB_ACCESS_TOKEN="${GITHUB_TOKEN}"
-
-          # Fast path: only the macOS slice.
-          if ! carthage bootstrap --use-xcframeworks --platform macOS; then
-            echo "::warning::carthage --platform macOS failed, retrying for all platforms"
-            carthage bootstrap --use-xcframeworks || true
+          # The "Copy Carthage frameworks" build phase shells out to carthage,
+          # so the binary must exist even when the cache is warm.
+          if ! command -v carthage >/dev/null 2>&1; then
+            brew install carthage
           fi
 
-          # PlayTools only exposes iOS slices, so a macOS-only bootstrap never
-          # produces it. Force a full update before giving up.
-          if [ ! -d Carthage/Build/PlayTools.xcframework ]; then
-            echo "::warning::PlayTools.xcframework missing, forcing a full update"
-            carthage update --use-xcframeworks || true
-          fi
+          if [ -d Carthage/Build/PlayTools.xcframework ]; then
+            echo "Carthage cache hit: skipping bootstrap"
+          else
+            # Carthage resolves PlayTools through the GitHub API. Handing it the
+            # token keeps us away from the anonymous 60 requests/hour limit
+            # ("API rate limit exceeded" is what killed earlier runs).
+            export GITHUB_ACCESS_TOKEN="${GITHUB_TOKEN}"
 
-          # Last resort: build PlayTools from a token-authenticated clone so the
-          # build never depends on the API budget.
-          if [ ! -d Carthage/Build/PlayTools.xcframework ]; then
-            echo "::warning::building PlayTools directly from source"
-            PT_SRC="$RUNNER_TEMP/PlayTools-src"
-            PT_OUT="$RUNNER_TEMP/PlayTools-out"
-            rm -rf "$PT_SRC" "$PT_OUT"
-            if git clone --depth 1 \
-                "https://x-access-token:${GITHUB_TOKEN}@github.com/PlayCover/PlayTools.git" "$PT_SRC"; then
-              ( cd "$PT_SRC" && xcodebuild build \
-                  -project PlayTools.xcodeproj \
-                  -scheme PlayTools \
-                  -sdk iphoneos \
-                  -arch arm64 \
-                  -configuration Release \
-                  -derivedDataPath "$RUNNER_TEMP/PlayTools-dd" \
-                  CONFIGURATION_BUILD_DIR="$PT_OUT" \
-                  CODE_SIGN_IDENTITY="" \
-                  CODE_SIGNING_REQUIRED=NO \
-                  CODE_SIGNING_ALLOWED=NO ) || true
-              if [ -d "$PT_OUT/PlayTools.framework" ]; then
-                mkdir -p "$PT_OUT/PlayTools.framework/PlugIns"
-                if [ -d "$PT_OUT/AKInterface.bundle" ]; then
-                  cp -R "$PT_OUT/AKInterface.bundle" "$PT_OUT/PlayTools.framework/PlugIns/"
+            # Fast path: only the macOS slice.
+            if ! carthage bootstrap --use-xcframeworks --platform macOS; then
+              echo "::warning::carthage --platform macOS failed, retrying for all platforms"
+              carthage bootstrap --use-xcframeworks || true
+            fi
+
+            # PlayTools only exposes iOS slices, so a macOS-only bootstrap never
+            # produces it. Force a full update before giving up.
+            if [ ! -d Carthage/Build/PlayTools.xcframework ]; then
+              echo "::warning::PlayTools.xcframework missing, forcing a full update"
+              carthage update --use-xcframeworks || true
+            fi
+
+            # Last resort: build PlayTools from a token-authenticated clone so the
+            # build never depends on the API budget.
+            if [ ! -d Carthage/Build/PlayTools.xcframework ]; then
+              echo "::warning::building PlayTools directly from source"
+              PT_SRC="$RUNNER_TEMP/PlayTools-src"
+              PT_OUT="$RUNNER_TEMP/PlayTools-out"
+              rm -rf "$PT_SRC" "$PT_OUT"
+              if git clone --depth 1 \
+                  "https://x-access-token:${GITHUB_TOKEN}@github.com/PlayCover/PlayTools.git" "$PT_SRC"; then
+                ( cd "$PT_SRC" && xcodebuild build \
+                    -project PlayTools.xcodeproj \
+                    -scheme PlayTools \
+                    -sdk iphoneos \
+                    -arch arm64 \
+                    -configuration Release \
+                    -derivedDataPath "$RUNNER_TEMP/PlayTools-dd" \
+                    CONFIGURATION_BUILD_DIR="$PT_OUT" \
+                    CODE_SIGN_IDENTITY="" \
+                    CODE_SIGNING_REQUIRED=NO \
+                    CODE_SIGNING_ALLOWED=NO ) || true
+                if [ -d "$PT_OUT/PlayTools.framework" ]; then
+                  mkdir -p "$PT_OUT/PlayTools.framework/PlugIns"
+                  if [ -d "$PT_OUT/AKInterface.bundle" ]; then
+                    cp -R "$PT_OUT/AKInterface.bundle" "$PT_OUT/PlayTools.framework/PlugIns/"
+                  fi
+                  mkdir -p Carthage/Build
+                  rm -rf Carthage/Build/PlayTools.xcframework
+                  xcodebuild -create-xcframework \
+                    -framework "$PT_OUT/PlayTools.framework" \
+                    -output Carthage/Build/PlayTools.xcframework || true
                 fi
-                mkdir -p Carthage/Build
-                rm -rf Carthage/Build/PlayTools.xcframework
-                xcodebuild -create-xcframework \
-                  -framework "$PT_OUT/PlayTools.framework" \
-                  -output Carthage/Build/PlayTools.xcframework || true
               fi
             fi
           fi
@@ -139,3 +172,4 @@ jobs:
           path: |
             PlayCover.dmg
             PlayCover_macOS.zip
+          if-no-files-found: error
