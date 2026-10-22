@@ -43,10 +43,27 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-swiftpm-
 
+      # Build products are restored (never required): Xcode then compiles only
+      # what changed instead of the whole project, which is what makes the
+      # cold build take ~30 minutes on a 3-core runner.
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: DerivedData/Build
+          key: ${{ runner.os }}-dd-${{ hashFiles('PlayCover/**/*.swift', 'PlayCover/**/*.h', 'PlayCover.xcodeproj/project.pbxproj') }}
+          restore-keys: |
+            ${{ runner.os }}-dd-
+
       - name: Install dependencies
         shell: bash
         run: |
           set -euo pipefail
+
+          # SwiftPM clones packages with plain git. Rewriting the URL through the
+          # token authenticates every clone, which removes the anonymous
+          # throttling that made package resolution crawl (the repository does
+          # not commit a Package.resolved, so xcodebuild resolves on every run).
+          git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
 
           # The "Copy Carthage frameworks" build phase shells out to carthage,
           # so the binary must exist even when the cache is warm.
@@ -118,8 +135,23 @@ jobs:
 
           ls -la Carthage/Build 2>/dev/null || true
 
+      # Resolution gets its own, time-boxed step so a stalled GitHub fetch fails
+      # here (fast and visible) instead of hiding inside a 30 minute build.
+      - name: Resolve Swift packages
+        shell: bash
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+
+          xcodebuild -resolvePackageDependencies \
+            -project PlayCover.xcodeproj \
+            -scheme PlayCover \
+            -derivedDataPath ./DerivedData \
+            -clonedSourcePackagesDirPath ./DerivedData/SourcePackages
+
       - name: Build (arm64)
         shell: bash
+        timeout-minutes: 45
         run: |
           set -euo pipefail
 
@@ -135,6 +167,9 @@ jobs:
             EXPANDED_CODE_SIGN_IDENTITY_NAME="-" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -skipPackagePluginValidation \
             FASTLANE=1
 
       - name: Package DMG and ZIP
