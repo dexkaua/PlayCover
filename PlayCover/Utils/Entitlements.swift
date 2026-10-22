@@ -63,6 +63,11 @@ class Entitlements {
         base["com.apple.security.personal-information.location"] = true
         base["com.apple.security.print"] = true
         base["com.apple.security.app-sandbox"] = true
+        // Required by apps like Alight Motion (com.alightcreative.alightmotion) that
+        // JIT-compile code and load unsigned native libraries inside the Mac Catalyst sandbox.
+        base["com.apple.security.cs.allow-unsigned-executable-memory"] = true
+        base["com.apple.security.cs.disable-library-validation"] = true
+        base["com.apple.security.get-task-allow"] = true
     }
 
     // swiftlint:disable:next cyclomatic_complexity
@@ -123,6 +128,10 @@ class Entitlements {
             sandboxProfile.append(contentsOf: PlayRules.buildRules(rules: rules.bypass ?? [], bundleID: bundleID))
         }
 
+        // Direct read-write access to the user's home folder (no sandbox blocking),
+        // needed by Alight Motion (com.alightcreative.alightmotion) to import/export
+        // media files straight from the Mac folders.
+        base["com.apple.security.temporary-exception.files.home-relative-path.read-write"] = ["/"]
         base["com.apple.security.temporary-exception.sbpl"] = sandboxProfile
 
         return base

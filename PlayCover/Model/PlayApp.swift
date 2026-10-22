@@ -78,11 +78,25 @@ class PlayApp: BaseApp {
 
             settings.sync()
 
+            let isAlightMotion = info.bundleIdentifier.lowercased().contains("alightmotion")
+
             // Install PlugIns/localizations before signing so the bundle is fully
             // assembled before its signature is sealed over its contents.
-            // If the app does not have PlayTools, do not install PlugIns
-            if hasPlayTools() {
+            // If the app does not have PlayTools, do not install PlugIns.
+            // Alight Motion must never receive AKInterface injection.
+            if hasPlayTools() && !isAlightMotion {
                 try PlayTools.installPluginInIPA(url)
+            }
+
+            // Alight Motion runs natively on macOS: strip leftover PlayTools from
+            // old installs, force iPad-native layout via PlistBuddy (zero type-risk),
+            // re-sign and register URL schemes with LaunchServices.
+            // CFBundleURLTypes is intentionally left untouched (deep links work).
+            if isAlightMotion {
+                cleanPlayToolsFromAlightMotion()
+                patchAlightMotionInfoPlist()
+                sign()
+                registerAlightMotionWithLaunchServices()
             }
 
             if try !Entitlements.areEntitlementsValid(app: self) {
@@ -103,6 +117,11 @@ class PlayApp: BaseApp {
             } else {
                 // Clear any debug-related env vars that could affect the launched app
                 self.clearDebugAffectingEnvironment()
+
+                // Finder shortcuts into the app's sandboxed container Documents folder
+                if isAlightMotion {
+                    createMacFolderSymlinks()
+                }
 
                 if settings.openWithLLDB {
                     try Shell.lldb(executable, withTerminalWindow: settings.openLLDBWithTerminal)
@@ -299,6 +318,71 @@ extension PlayApp {
 
 // MARK: - FS / Codesign
 extension PlayApp {
+    // Alight Motion: paths to leftover PlayTools artifacts from older installs.
+    private var alightMotionPlayToolsDylib: URL {
+        url.appendingPathComponent("Frameworks")
+            .appendingPathComponent("PlayTools")
+            .appendingPathExtension("dylib")
+    }
+
+    private var alightMotionAKInterfaceBundle: URL {
+        url.appendingPathComponent("PlugIns")
+            .appendingPathComponent("AKInterface")
+            .appendingPathExtension("bundle")
+    }
+
+    /// Removes PlayTools leftovers (dylib / AKInterface.bundle) from the app bundle.
+    /// The LC_LOAD_DYLIB reference itself is neutralized by re-signing without
+    /// PlayTools entitlements; missing files are simply skipped.
+    func cleanPlayToolsFromAlightMotion() {
+        try? FileManager.default.removeItem(at: alightMotionPlayToolsDylib)
+        try? FileManager.default.removeItem(at: alightMotionAKInterfaceBundle)
+    }
+
+    /// Forces native iPad layout using PlistBuddy (avoids any Swift plist type-cast issues).
+    /// CFBundleURLTypes is deliberately untouched so `alightcreative://` deep links keep working.
+    func patchAlightMotionInfoPlist() {
+        let plistPath = info.url.path
+        let plbuddy = "/usr/libexec/PlistBuddy"
+        // try? swallows errors (e.g. Delete on a non-existent key), keeping launch safe.
+        _ = try? Shell.run(plbuddy, "-c", "Delete :UIDeviceFamily", plistPath)
+        _ = try? Shell.run(plbuddy, "-c", "Add :UIDeviceFamily array", plistPath)
+        _ = try? Shell.run(plbuddy, "-c", "Add :UIDeviceFamily:0 integer 2", plistPath)
+        _ = try? Shell.run(plbuddy, "-c", "Delete :UIRequiresFullScreen", plistPath)
+        _ = try? Shell.run(plbuddy, "-c", "Add :UIRequiresFullScreen bool false", plistPath)
+    }
+
+    /// Registers the bundle (and its URL schemes) with LaunchServices.
+    func registerAlightMotionWithLaunchServices() {
+        _ = try? Shell.run(
+            "/System/Library/Frameworks/CoreServices.framework"
+                + "/Frameworks/LaunchServices.framework/Support/lsregister",
+            "-f", url.path)
+    }
+
+    /// Creates Mac_Downloads / Mac_Movies / Mac_Desktop symlinks inside the app
+    /// container's Documents folder for quick Finder access.
+    func createMacFolderSymlinks() {
+        let documents = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Containers")
+            .appendingPathComponent(info.bundleIdentifier)
+            .appendingPathComponent("Data/Documents")
+        try? FileManager.default.createDirectory(at: documents,
+                                                 withIntermediateDirectories: true)
+
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let links: [(String, String)] = [
+            ("Mac_Downloads", "Downloads"),
+            ("Mac_Movies", "Movies"),
+            ("Mac_Desktop", "Desktop")
+        ]
+        for (linkName, folderName) in links {
+            try? FileManager.default.createSymbolicLink(
+                at: documents.appendingPathComponent(linkName),
+                withDestinationURL: home.appendingPathComponent(folderName))
+        }
+    }
+
     func hasAlias() -> Bool {
         FileManager.default.fileExists(atPath: aliasURL.path)
     }
