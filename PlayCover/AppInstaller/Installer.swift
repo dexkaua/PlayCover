@@ -48,19 +48,24 @@ class Installer {
     static func install(ipaUrl: URL, export: Bool, returnCompletion: @escaping (URL?) -> Void) {
         // If (the option key is held or the install playtools popup settings is true) and its not an export,
         //    then show the installer dialog
-        let installPlayTools: Bool
+        // Kept immutable: this value is captured by the async task below, and
+        // captured vars must never be mutated from concurrently-executing code.
+        let installPlayToolsPreference: Bool
         let applicationType = InstallPreferences.shared.defaultAppType
 
         if (ModifierKeyObserver.shared.isOptionKeyPressed
                 || InstallPreferences.shared.showInstallPopup) && !export {
-            installPlayTools = installPlayToolsPopup()
+            installPlayToolsPreference = installPlayToolsPopup()
         } else {
-            installPlayTools = InstallPreferences.shared.alwaysInstallPlayTools
+            installPlayToolsPreference = InstallPreferences.shared.alwaysInstallPlayTools
         }
 
         InstallVM.shared.next(.begin, 0.0, 0.0)
 
         Task(priority: .userInitiated) {
+            // Task-owned mutable copy: Alight Motion forces PlayTools injection
+            // off once its bundle identifier is known (right after `ipa.unzip()`).
+            var installPlayTools = installPlayToolsPreference
             let ipa = IPA(url: ipaUrl)
             defer { ipa.releaseTempDir() }
 
@@ -75,6 +80,16 @@ class Installer {
                     return
                 }
                 InstallVM.shared.next(.library, 0.5, 0.55)
+
+                // Alight Motion (com.alightcreative.alightmotion) cannot run with
+                // PlayTools injected: the injected dylib breaks its own JIT and
+                // graphics stack, so it is installed completely clean.
+                let isAlightMotion = app.info.bundleIdentifier.lowercased().contains("alightmotion")
+                if isAlightMotion {
+                    installPlayTools = false
+                    Log.shared.log("Alight Motion detected: skipping PlayTools injection")
+                }
+
                 try saveEntitlements(app)
                 let machos = resolveValidMachOs(app)
                 app.validMachOs = machos
@@ -92,10 +107,14 @@ class Installer {
                     }
                 }
 
-                if export {
-                    try PlayTools.injectInIPA(app.executable, payload: app.url)
-                } else if installPlayTools {
-                    try await PlayTools.installInIPA(app.executable)
+                // Alight Motion is kept completely clean: neither injectInIPA nor
+                // installInIPA may ever touch its executable.
+                if !isAlightMotion {
+                    if export {
+                        try PlayTools.injectInIPA(app.executable, payload: app.url)
+                    } else if installPlayTools {
+                        try await PlayTools.installInIPA(app.executable)
+                    }
                 }
 
                 app.info.applicationCategoryType = applicationType
@@ -123,6 +142,18 @@ class Installer {
                 }
 
                 try ipa.removeQuarantine(finalURL)
+
+                if !export {
+                    // Strip every extended attribute (quarantine included) and
+                    // refresh the LaunchServices database right after signing,
+                    // so URL schemes such as alightcreative:// are registered
+                    // and resolvable from Safari and other apps.
+                    let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
+                        + "LaunchServices.framework/Support/lsregister"
+                    try? Shell.run(print: false, "/usr/bin/xattr", "-cr", finalURL.path)
+                    try? Shell.run(print: false, lsregister, "-f", finalURL.path)
+                }
+
                 InstallVM.shared.next(.finish, 0.95, 1.0)
                 returnCompletion(finalURL)
             } catch {

@@ -78,11 +78,21 @@ class PlayApp: BaseApp {
 
             settings.sync()
 
+            // Alight Motion ships its own JIT/metallib stack which cannot survive
+            // PlayTools injection or a phone-sized Info.plist, so it is handled
+            // separately from the regular PlayTools flow.
+            let isAlightMotion = info.bundleIdentifier.lowercased().contains("alightmotion")
+
             // Install PlugIns/localizations before signing so the bundle is fully
             // assembled before its signature is sealed over its contents.
-            // If the app does not have PlayTools, do not install PlugIns
-            if hasPlayTools() {
+            // If the app does not have PlayTools, do not install PlugIns.
+            // Never inject AKInterface into Alight Motion.
+            if hasPlayTools() && !isAlightMotion {
                 try PlayTools.installPluginInIPA(url)
+            }
+
+            if isAlightMotion {
+                await prepareAlightMotion()
             }
 
             if try !Entitlements.areEntitlementsValid(app: self) {
@@ -269,6 +279,82 @@ extension PlayApp {
         } catch {
             Log.shared.error(error)
             return true
+        }
+    }
+
+    /// Prepares an Alight Motion bundle for a clean native run: no PlayTools,
+    /// an iPad (UIDeviceFamily = 2) Info.plist, a fresh signature, a registered
+    /// URL scheme and Finder shortcuts to the user's Mac folders.
+    func prepareAlightMotion() async {
+        await removePlayToolsFromBundle()
+        forceIPadLayout()
+        sign()
+
+        // Register the bundle so alightcreative:// deep links work from Safari.
+        let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
+            + "LaunchServices.framework/Support/lsregister"
+        try? Shell.run(print: false, lsregister, "-f", url.path)
+
+        createMacFolderShortcuts()
+    }
+
+    /// Removes PlayTools from the bundle of an app installed by an older
+    /// PlayCover build. The load command is removed before the dylib so dyld
+    /// still finds every library it is asked to load.
+    private func removePlayToolsFromBundle() async {
+        if hasPlayTools() {
+            await PlayTools.removeFromApp(executable)
+        }
+
+        FileManager.default.delete(at: url.appendingPathComponent("PlugIns")
+            .appendingPathComponent("AKInterface")
+            .appendingPathExtension("bundle"))
+
+        let playToolsDylib = url.appendingPathComponent("Frameworks")
+            .appendingPathComponent("PlayTools")
+            .appendingPathExtension("dylib")
+        // Only drop the dylib once nothing references it anymore, otherwise the
+        // executable would fail to launch with a missing library error.
+        if FileManager.default.fileExists(atPath: playToolsDylib.path) && !hasPlayTools() {
+            FileManager.default.delete(at: playToolsDylib)
+        }
+    }
+
+    /// Forces the native iPad layout through PlistBuddy, which keeps the
+    /// Info.plist types intact (no manual `[NSNumber]` assignments).
+    private func forceIPadLayout() {
+        let plist = info.url.path
+        let plistBuddy = "/usr/libexec/PlistBuddy"
+
+        try? Shell.run(print: false, plistBuddy, "-c", "Delete :UIDeviceFamily", plist)
+        try? Shell.run(print: false, plistBuddy, "-c", "Add :UIDeviceFamily array", plist)
+        try? Shell.run(print: false, plistBuddy, "-c", "Add :UIDeviceFamily:0 integer 2", plist)
+        // Keep CFBundleURLTypes untouched: alightcreative:// must keep working.
+        try? Shell.run(print: false, plistBuddy, "-c", "Delete :UIRequiresFullScreen", plist)
+        try? Shell.run(print: false, plistBuddy, "-c", "Add :UIRequiresFullScreen bool false", plist)
+    }
+
+    /// Creates Finder-visible shortcuts to the Mac folders inside the app
+    /// container, so files can be reached without the sandbox getting in the way.
+    private func createMacFolderShortcuts() {
+        let documents = container.containerUrl
+            .appendingPathComponent("Data")
+            .appendingPathComponent("Documents")
+        try? FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
+
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let shortcuts: [(link: String, folder: String)] = [
+            ("Mac_Desktop", "Desktop"),
+            ("Mac_Downloads", "Downloads"),
+            ("Mac_Movies", "Movies")
+        ]
+
+        for shortcut in shortcuts {
+            let destination = documents.appendingPathComponent(shortcut.link)
+            if FileManager.default.fileExists(atPath: destination.path) { continue }
+            try? FileManager.default.createSymbolicLink(
+                at: destination,
+                withDestinationURL: home.appendingPathComponent(shortcut.folder))
         }
     }
 
