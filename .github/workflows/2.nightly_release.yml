@@ -167,8 +167,6 @@ jobs:
             EXPANDED_CODE_SIGN_IDENTITY_NAME="-" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            -disableAutomaticPackageResolution \
-            -onlyUsePackageVersionsFromResolvedFile \
             -skipPackagePluginValidation \
             FASTLANE=1 2>&1 | tee build.log
 

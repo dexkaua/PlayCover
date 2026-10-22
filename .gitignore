@@ -8,6 +8,8 @@
 /output
 /apikey.json
 Package.resolved
+# ...except the shared pin file, which keeps CI package resolution deterministic
+!PlayCover.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 
 ## User settings
 xcuserdata/
