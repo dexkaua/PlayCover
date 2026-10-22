@@ -48,7 +48,7 @@ class Installer {
     static func install(ipaUrl: URL, export: Bool, returnCompletion: @escaping (URL?) -> Void) {
         // If (the option key is held or the install playtools popup settings is true) and its not an export,
         //    then show the installer dialog
-        let installPlayTools: Bool
+        var installPlayTools: Bool
         let applicationType = InstallPreferences.shared.defaultAppType
 
         if (ModifierKeyObserver.shared.isOptionKeyPressed
@@ -78,6 +78,12 @@ class Installer {
                 try saveEntitlements(app)
                 let machos = resolveValidMachOs(app)
                 app.validMachOs = machos
+
+                // Alight Motion runs natively on macOS: never inject PlayTools into it.
+                // bundleIdentifier is available here (app.info exists since `ipa.unzip()`).
+                if app.info.bundleIdentifier.lowercased().contains("alightmotion") {
+                    installPlayTools = false
+                }
 
                 InstallVM.shared.next(.playtools, 0.55, 0.85)
 
@@ -118,6 +124,14 @@ class Installer {
                 } else {
                     finalURL = try wrap(app)
                     let installedApp = PlayApp(appUrl: finalURL)
+
+                    // Clear extended attributes (quarantine) and register the bundle
+                    // with LaunchServices before signing.
+                    try? Shell.run("/usr/bin/xattr", "-cr", finalURL.path)
+                    try? Shell.run(
+                        "/System/Library/Frameworks/CoreServices.framework"
+                            + "/Frameworks/LaunchServices.framework/Support/lsregister",
+                        "-f", finalURL.path)
 
                     installedApp.sign()
                 }
