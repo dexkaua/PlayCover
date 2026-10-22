@@ -59,19 +59,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # SwiftPM clones packages with plain git. Rewriting the URL through the
-          # token authenticates every clone, which removes the anonymous
-          # throttling that made package resolution crawl (the repository does
-          # not commit a Package.resolved, so xcodebuild resolves on every run).
-          git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
-
-          # xcodebuild resolves packages with libgit2 (not the git CLI), and
-          # libgit2 reads credentials from ~/.netrc. Anonymous clones on a shared
-          # runner IP are throttled, which is why resolution took 20+ minutes.
-          printf 'machine github.com\n  login x-access-token\n  password %s\n' "${GITHUB_TOKEN}" > ~/.netrc
-          printf 'machine api.github.com\n  login x-access-token\n  password %s\n' "${GITHUB_TOKEN}" >> ~/.netrc
-          chmod 600 ~/.netrc
-          echo "~/.netrc written for authenticated package resolution"
 
           # The "Copy Carthage frameworks" build phase shells out to carthage,
           # so the binary must exist even when the cache is warm.
@@ -142,20 +129,6 @@ jobs:
           fi
 
           ls -la Carthage/Build 2>/dev/null || true
-
-      # Resolution gets its own, time-boxed step so a stalled GitHub fetch fails
-      # here (fast and visible) instead of hiding inside a 30 minute build.
-      - name: Resolve Swift packages
-        shell: bash
-        timeout-minutes: 45
-        run: |
-          set -euo pipefail
-
-          xcodebuild -resolvePackageDependencies \
-            -project PlayCover.xcodeproj \
-            -scheme PlayCover \
-            -derivedDataPath ./DerivedData \
-            -clonedSourcePackagesDirPath ./DerivedData/SourcePackages
 
       - name: Build (arm64)
         shell: bash
