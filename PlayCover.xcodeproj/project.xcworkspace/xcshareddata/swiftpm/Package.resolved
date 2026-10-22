@@ -1,0 +1,76 @@
+{
+  "pins" : [
+    {
+      "identity" : "cachedasyncimage",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/bullinnyc/CachedAsyncImage",
+      "state" : {
+        "revision" : "407fd103d19364e9a5fe07de75e2b0df6ffb9047",
+        "version" : "2.6.0"
+      }
+    },
+    {
+      "identity" : "datacache",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/huynguyencong/DataCache",
+      "state" : {
+        "revision" : "99ee7d721a3ae192d5efb890de7becd2ee65f1d0",
+        "version" : "1.6.1"
+      }
+    },
+    {
+      "identity" : "download-manager",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/shapedbyiris/download-manager.git",
+      "state" : {
+        "revision" : "876abbde2ca44e18469bef9b723a781cd8226456",
+        "version" : "0.1.0"
+      }
+    },
+    {
+      "identity" : "inject",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/paradiseduo/inject",
+      "state" : {
+        "revision" : "4ee23a45f25763f61903b1111bce7605617a4dd7",
+        "version" : "1.2.1"
+      }
+    },
+    {
+      "identity" : "sparkle",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/sparkle-project/Sparkle",
+      "state" : {
+        "revision" : "eef1a539a373c1f1a320624b1130fc5de7b2e100",
+        "version" : "2.10.0"
+      }
+    },
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser",
+      "state" : {
+        "revision" : "6a52f3251125d74daf04fcbd5e6f08a75d074382",
+        "version" : "1.8.2"
+      }
+    },
+    {
+      "identity" : "swiftsoup",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/PlayCover/SwiftSoup",
+      "state" : {
+        "revision" : "6d808c0522471d9f8892c85601164ed5b462f8c0"
+      }
+    },
+    {
+      "identity" : "yams",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/jpsim/Yams.git",
+      "state" : {
+        "revision" : "3d6871d5b4a5cd519adf233fbb576e0a2af71c17",
+        "version" : "5.4.0"
+      }
+    }
+  ],
+  "version" : 2
+}

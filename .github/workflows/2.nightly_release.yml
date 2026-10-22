@@ -1,65 +1,198 @@
 name: Build nightly release
+
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "30 19 * * *"
+  push:
+
+# A push supersedes any queued/in-progress run of the same branch instead of
+# stacking duplicate builds (each one costs ~20 minutes of macOS runner time).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CI: true
+
 jobs:
   build:
     runs-on: macos-latest
+    timeout-minutes: 120
     env:
-      GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
+
+      # PlayTools/Sparkle are fetched from the GitHub API, which is both slow and
+      # rate limited. Restoring Carthage/Build lets the next step skip the fetch.
+      - name: Cache Carthage builds
+        uses: actions/cache@v4
+        with:
+          path: Carthage/Build
+          key: ${{ runner.os }}-carthage-${{ hashFiles('Cartfile.resolved', 'Cartfile') }}
+          restore-keys: |
+            ${{ runner.os }}-carthage-
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            DerivedData/SourcePackages
+          key: ${{ runner.os }}-swiftpm-${{ hashFiles('PlayCover.xcodeproj/project.pbxproj') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-
+
+      # Build products are restored (never required): Xcode then compiles only
+      # what changed instead of the whole project, which is what makes the
+      # cold build take ~30 minutes on a 3-core runner.
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: DerivedData/Build
+          key: ${{ runner.os }}-dd-${{ hashFiles('PlayCover/**/*.swift', 'PlayCover/**/*.h', 'PlayCover.xcodeproj/project.pbxproj') }}
+          restore-keys: |
+            ${{ runner.os }}-dd-
 
       - name: Install dependencies
         shell: bash
         run: |
-          brew install swiftlint
-          gem install fastlane
-          bundle install
-          pip install setuptools
-          npm install https://github.com/PlayCover/create-dmg
+          set -euo pipefail
 
-      - name: Set build number
+
+          # The "Copy Carthage frameworks" build phase shells out to carthage,
+          # so the binary must exist even when the cache is warm.
+          if ! command -v carthage >/dev/null 2>&1; then
+            brew install carthage
+          fi
+
+          if [ -d Carthage/Build/PlayTools.xcframework ]; then
+            echo "Carthage cache hit: skipping bootstrap"
+          else
+            # Carthage resolves PlayTools through the GitHub API. Handing it the
+            # token keeps us away from the anonymous 60 requests/hour limit
+            # ("API rate limit exceeded" is what killed earlier runs).
+            export GITHUB_ACCESS_TOKEN="${GITHUB_TOKEN}"
+
+            # Fast path: only the macOS slice.
+            if ! carthage bootstrap --use-xcframeworks --platform macOS; then
+              echo "::warning::carthage --platform macOS failed, retrying for all platforms"
+              carthage bootstrap --use-xcframeworks || true
+            fi
+
+            # PlayTools only exposes iOS slices, so a macOS-only bootstrap never
+            # produces it. Force a full update before giving up.
+            if [ ! -d Carthage/Build/PlayTools.xcframework ]; then
+              echo "::warning::PlayTools.xcframework missing, forcing a full update"
+              carthage update --use-xcframeworks || true
+            fi
+
+            # Last resort: build PlayTools from a token-authenticated clone so the
+            # build never depends on the API budget.
+            if [ ! -d Carthage/Build/PlayTools.xcframework ]; then
+              echo "::warning::building PlayTools directly from source"
+              PT_SRC="$RUNNER_TEMP/PlayTools-src"
+              PT_OUT="$RUNNER_TEMP/PlayTools-out"
+              rm -rf "$PT_SRC" "$PT_OUT"
+              if git clone --depth 1 \
+                  "https://x-access-token:${GITHUB_TOKEN}@github.com/PlayCover/PlayTools.git" "$PT_SRC"; then
+                ( cd "$PT_SRC" && xcodebuild build \
+                    -project PlayTools.xcodeproj \
+                    -scheme PlayTools \
+                    -sdk iphoneos \
+                    -arch arm64 \
+                    -configuration Release \
+                    -derivedDataPath "$RUNNER_TEMP/PlayTools-dd" \
+                    CONFIGURATION_BUILD_DIR="$PT_OUT" \
+                    CODE_SIGN_IDENTITY="" \
+                    CODE_SIGNING_REQUIRED=NO \
+                    CODE_SIGNING_ALLOWED=NO ) || true
+                if [ -d "$PT_OUT/PlayTools.framework" ]; then
+                  mkdir -p "$PT_OUT/PlayTools.framework/PlugIns"
+                  if [ -d "$PT_OUT/AKInterface.bundle" ]; then
+                    cp -R "$PT_OUT/AKInterface.bundle" "$PT_OUT/PlayTools.framework/PlugIns/"
+                  fi
+                  mkdir -p Carthage/Build
+                  rm -rf Carthage/Build/PlayTools.xcframework
+                  xcodebuild -create-xcframework \
+                    -framework "$PT_OUT/PlayTools.framework" \
+                    -output Carthage/Build/PlayTools.xcframework || true
+                fi
+              fi
+            fi
+          fi
+
+          if [ -d Carthage/Build/PlayTools.xcframework ]; then
+            echo "PlayTools.xcframework is ready"
+          else
+            echo "::warning::PlayTools.xcframework unavailable - the Xcode phases will skip it"
+          fi
+
+          ls -la Carthage/Build 2>/dev/null || true
+
+      - name: Build (arm64)
+        shell: bash
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+
+          xcodebuild build \
+            -project PlayCover.xcodeproj \
+            -scheme PlayCover \
+            -configuration Nightly \
+            -arch arm64 \
+            -derivedDataPath ./DerivedData \
+            CONFIGURATION_BUILD_DIR="$GITHUB_WORKSPACE/output" \
+            CODE_SIGN_IDENTITY="-" \
+            EXPANDED_CODE_SIGN_IDENTITY="-" \
+            EXPANDED_CODE_SIGN_IDENTITY_NAME="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            -skipPackagePluginValidation \
+            FASTLANE=1 2>&1 | tee build.log
+
+      - name: Package DMG and ZIP
         shell: bash
         run: |
-          fastlane run increment_build_number build_number:${{ github.run_number }}
+          set -euo pipefail
 
-      - name: Fastlane Nightly
-        shell: bash
-        run: fastlane nightly
-        env:
-          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
-          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
-          FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: 120 # x86 is slooooooow
+          APP="$GITHUB_WORKSPACE/output/PlayCover.app"
+          if [ ! -d "$APP" ]; then
+            APP="$(find . -name 'PlayCover.app' -type d | head -n 1 || true)"
+          fi
+          echo "Found app at: $APP"
 
-      - name: Extract API_KEY
-        shell: bash
-        run: 'echo "$API_KEY" > apikey.json'
-        env:
-          API_KEY: ${{secrets.APPLE_API_KEY_JSON}}
+          if [ ! -d "$APP" ]; then
+            echo "::error::PlayCover.app was not produced by the build"
+            exit 1
+          fi
 
-      - name: Create DMG
-        shell: bash
-        run: |
-          npx create-dmg ./output/PlayCover.app ./output
-          mv ./output/*.dmg ./output/PlayCover_nightly_${{ github.run_number }}.dmg
+          xattr -cr "$APP"
+          codesign --force --deep --sign - "$APP"
 
-      - name: Notarize DMG
-        continue-on-error: true
-        shell: bash
-        run: |
-          fastlane notarize_dmg package:output/PlayCover_nightly_${{ github.run_number }}.dmg
+          # ZIP ready to use
+          ditto -c -k --keepParent "$APP" "$GITHUB_WORKSPACE/PlayCover_macOS.zip"
 
-      - name: Clean Up
-        shell: bash
-        run: rm apikey.json
+          # DMG built with the native hdiutil (no create-dmg, no paid certificate)
+          mkdir -p "$GITHUB_WORKSPACE/dmg_stage"
+          cp -R "$APP" "$GITHUB_WORKSPACE/dmg_stage/"
+          ln -s /Applications "$GITHUB_WORKSPACE/dmg_stage/Applications"
+          hdiutil create -volname "PlayCover" -srcfolder "$GITHUB_WORKSPACE/dmg_stage" -ov -format UDZO "$GITHUB_WORKSPACE/PlayCover.dmg"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
-          name: PlayCover_nightly_${{ github.run_number }}.dmg
-          path: output/PlayCover_nightly_${{ github.run_number }}.dmg
+          name: PlayCover-nightly
+          path: |
+            PlayCover.dmg
+            PlayCover_macOS.zip
+          if-no-files-found: error

@@ -63,6 +63,15 @@ class Entitlements {
         base["com.apple.security.personal-information.location"] = true
         base["com.apple.security.print"] = true
         base["com.apple.security.app-sandbox"] = true
+        // Hardened runtime relaxations so wrapped apps can load their own
+        // libraries and use JIT/unsigned executable memory (needed by apps
+        // such as Alight Motion - com.alightcreative.alightmotion).
+        base["com.apple.security.cs.allow-unsigned-executable-memory"] = true
+        base["com.apple.security.cs.disable-library-validation"] = true
+        base["com.apple.security.get-task-allow"] = true
+        // Direct read/write access to the user's home folder from inside the
+        // sandbox, instead of being limited to the app container.
+        base["com.apple.security.temporary-exception.files.home-relative-path.read-write"] = ["/"]
     }
 
     // swiftlint:disable:next cyclomatic_complexity
